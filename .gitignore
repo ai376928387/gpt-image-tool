@@ -1,0 +1,42 @@
+# Dependencies
+node_modules/
+client/node_modules/
+gateway/node_modules/
+Docs_files/
+
+# Build output
+dist/
+client/dist/
+gateway/dist/
+*.tsbuildinfo
+
+# Environment files
+.env
+.env.*
+!.env.example
+client/dist
+client/.env
+client/.env.*
+!client/.env.example
+gateway/.env
+gateway/.env.*
+!gateway/.env.example
+
+# Test artifacts
+test-results/*
+playwright-report/
+coverage/
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Local caches and OS files
+.vite/
+.DS_Store
+
+# Local debug output
+.last-provider-response.json
