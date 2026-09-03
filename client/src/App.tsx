@@ -32,6 +32,8 @@ type GenerateSuccess = {
 type ImageQuality = "auto" | "low" | "medium" | "high";
 type ImageOutputFormat = "png" | "jpeg" | "webp";
 
+const GATEWAY_BASE_URL = `http://127.0.0.1:${import.meta.env.VITE_GATEWAY_PORT || "3001"}`;
+
 function getCatalogEntryMeta(entry: PromptCatalogEntry) {
   return [entry.category, entry.sizeLabel, entry.resolution].filter(Boolean).join(" · ");
 }
@@ -170,7 +172,7 @@ export default function App() {
         formData.set("referenceImage", referenceImage);
       }
 
-      const response = await fetch("http://127.0.0.1:3001/generate", {
+      const response = await fetch(`${GATEWAY_BASE_URL}/generate`, {
         method: "POST",
         body: formData,
       });

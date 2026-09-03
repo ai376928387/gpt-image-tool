@@ -40,3 +40,6 @@ pnpm-debug.log*
 
 # Local debug output
 .last-provider-response.json
+
+# MCP-generated image files
+.image-output/

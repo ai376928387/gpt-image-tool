@@ -1,11 +1,12 @@
 import type { Express } from "express";
 
-const DEFAULT_BASE_URL = "https://api-xai.ainaibahub.com/v1";
+const DEFAULT_BASE_URL = "https://api.yairouter.com/v1";
 const DEFAULT_TEXT_MODEL = "gpt-5.5";
 const DEFAULT_IMAGE_MODEL = "gpt-image-2";
 const DEFAULT_IMAGE_SIZE = "1024x1024";
 const DEFAULT_IMAGE_QUALITY = "high";
 const DEFAULT_IMAGE_OUTPUT_FORMAT = "png";
+const PROVIDER_TIMEOUT_MS = 300_000;
 
 type ProviderConfig = {
   apiKey: string;
@@ -17,42 +18,51 @@ type ProviderConfig = {
   imageOutputFormat: string;
 };
 
-type ImageOptions = {
-  size?: string;
+export type ImageOptions = {
+  size: string;
   quality: string;
   outputFormat: string;
 };
 
-function getMimeTypeForOutputFormat(outputFormat: string) {
-  return outputFormat === "jpeg" ? "image/jpeg" : `image/${outputFormat}`;
-}
+export type ImageFile = Pick<Express.Multer.File, "buffer" | "mimetype" | "originalname">;
+
+export type ImageResult = {
+  imageDataUrl: string;
+  mimeType: string;
+  model: string;
+  operation: "generate" | "edit";
+};
+
+export type ImageReviewResult = {
+  text: string;
+  model: string;
+  imageCount: number;
+};
 
 type ProviderRequestFailure = Error & {
   status?: number;
   technicalDetails?: string;
 };
 
-type ResponseOutputItem = {
+type ProviderImageData = {
   type?: string;
   result?: string;
   image_url?: string;
   b64_json?: string;
-  text?: string;
+  url?: string;
 };
 
-type ResponseOutputBlock = {
-  type?: string;
-  result?: string;
-  image_url?: string;
-  b64_json?: string;
-  content?: Array<ResponseOutputItem>;
+type ProviderResponseOutputBlock = ProviderImageData & {
+  content?: Array<ProviderResponseOutputBlock>;
 };
 
-type ResponsesApiPayload = {
+type ProviderPayload = {
   error?: {
     message?: string;
   };
-  output?: Array<ResponseOutputBlock>;
+  data?: Array<ProviderImageData>;
+  output?: Array<ProviderResponseOutputBlock>;
+  output_text?: string;
 };
 
 type ResponsesApiInputContent =
@@ -76,11 +86,22 @@ export type OperatorFailure = {
   technicalDetails?: string;
 };
 
+function getMimeTypeForOutputFormat(outputFormat: string) {
+  return outputFormat === "jpeg" ? "image/jpeg" : `image/${outputFormat}`;
+}
+
+function createProviderFailure(status: number, message: string, technicalDetails?: string) {
+  const error = new Error(message) as ProviderRequestFailure;
+  error.status = status;
+  error.technicalDetails = technicalDetails;
+  return error;
+}
+
 export function getProviderConfig(): ProviderConfig {
-  const apiKey = process.env.API_KEY;
+  const apiKey = process.env.XAI_API_KEY || process.env.API_KEY;
 
   if (!apiKey) {
-    throw createProviderFailure(500, "API_KEY is missing.");
+    throw createProviderFailure(500, "XAI_API_KEY is missing.");
   }
 
   return {
@@ -94,15 +115,10 @@ export function getProviderConfig(): ProviderConfig {
   };
 }
 
-function createProviderFailure(status: number, message: string, technicalDetails?: string) {
-  const error = new Error(message) as ProviderRequestFailure;
-  error.status = status;
-  error.technicalDetails = technicalDetails;
-  return error;
-}
-
 async function fetchRemoteImageAsDataUrl(url: string) {
-  const response = await fetch(url);
+  const response = await fetch(url, {
+    signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS),
+  });
 
   if (!response.ok) {
     throw createProviderFailure(
@@ -118,186 +134,341 @@ async function fetchRemoteImageAsDataUrl(url: string) {
   return `data:${contentType};base64,${buffer.toString("base64")}`;
 }
 
-function extractImageCandidate(
-  item: { type?: string; result?: string; image_url?: string; b64_json?: string },
-  outputFormat: string,
-) {
+function toDataUrl(value: string, outputFormat: string) {
+  if (value.startsWith("data:image/")) {
+    return value;
+  }
+
+  return `data:${getMimeTypeForOutputFormat(outputFormat)};base64,${value}`;
+}
+
+function extractImageCandidate(item: ProviderImageData, outputFormat: string) {
+  if (typeof item.b64_json === "string") {
+    return toDataUrl(item.b64_json, outputFormat);
+  }
+
   if (typeof item.result === "string") {
     if (item.result.startsWith("data:image/")) {
       return item.result;
     }
 
-    // AinaibaHub returns image_generation_call.result as raw base64 image data.
-    if (item.type === "image_generation_call") {
-      return `data:${getMimeTypeForOutputFormat(outputFormat)};base64,${item.result}`;
-    }
+    // YAI Router returns image_generation_call.result as raw base64 image data.
+    return toDataUrl(item.result, outputFormat);
   }
 
-  if (item.image_url) {
+  if (typeof item.image_url === "string") {
     return item.image_url;
   }
 
-  if (item.b64_json) {
-    return `data:${getMimeTypeForOutputFormat(outputFormat)};base64,${item.b64_json}`;
+  if (typeof item.url === "string") {
+    return item.url;
   }
 
   return null;
 }
 
-function findImageOutput(payload: ResponsesApiPayload, outputFormat: string) {
-  for (const outputItem of payload.output || []) {
-    const directCandidate = extractImageCandidate(outputItem, outputFormat);
+function findImageOutput(payload: ProviderPayload, outputFormat: string) {
+  for (const dataItem of payload.data || []) {
+    const candidate = extractImageCandidate(dataItem, outputFormat);
 
-    if (directCandidate) {
-      return directCandidate;
+    if (candidate) {
+      return candidate;
     }
+  }
 
-    for (const contentItem of outputItem.content || []) {
-      const nestedCandidate = extractImageCandidate(contentItem, outputFormat);
+  function findInOutput(items: ProviderResponseOutputBlock[]): string | null {
+    for (const item of items) {
+      const directCandidate = extractImageCandidate(item, outputFormat);
+
+      if (directCandidate) {
+        return directCandidate;
+      }
+
+      const nestedCandidate = item.content ? findInOutput(item.content) : null;
 
       if (nestedCandidate) {
         return nestedCandidate;
       }
     }
+
+    return null;
   }
 
-  return null;
+  return findInOutput(payload.output || []);
 }
 
-async function normalizeProviderResponse(response: Response, outputFormat: string) {
-  console.log("[DEBUG-gateway] upstreamStatus", {
-    status: response.status,
-    statusText: response.statusText,
-  });
-
-  const payload = (await response.json().catch(() => null)) as ResponsesApiPayload | null;
-
-  console.log("[DEBUG-gateway] upstreamPayload", {
-    topLevelKeys: payload ? Object.keys(payload).slice(0, 20) : null,
-    outputTypes: payload?.output?.map((item) => item.type) || [],
-  });
+async function parseProviderPayload(response: Response) {
+  const payload = (await response.json().catch(() => null)) as ProviderPayload | null;
 
   if (!response.ok) {
     throw createProviderFailure(
       response.status,
-      payload?.error?.message || "Image generation failed.",
+      payload?.error?.message || "Provider request failed.",
       payload?.error?.message ? `Provider returned: ${payload.error.message}` : response.statusText || undefined,
     );
   }
 
-  const imageOutput = payload ? findImageOutput(payload, outputFormat) : null;
+  return payload;
+}
+
+async function normalizeImageResponse(response: Response, options: ImageOptions, operation: ImageResult["operation"], model: string) {
+  console.log("[DEBUG-gateway] upstreamImageStatus", {
+    status: response.status,
+    statusText: response.statusText,
+    operation,
+  });
+
+  const payload = await parseProviderPayload(response);
+  const imageOutput = payload ? findImageOutput(payload, options.outputFormat) : null;
 
   if (!imageOutput) {
     throw createProviderFailure(502, "Image generation failed.", "Provider response did not include an image output.");
   }
 
-  if (imageOutput.startsWith("data:image/")) {
-    return imageOutput;
-  }
+  const imageDataUrl = imageOutput.startsWith("data:image/")
+    ? imageOutput
+    : await fetchRemoteImageAsDataUrl(imageOutput);
 
-  return fetchRemoteImageAsDataUrl(imageOutput);
+  return {
+    imageDataUrl,
+    mimeType: imageDataUrl.slice(5, imageDataUrl.indexOf(";")),
+    model,
+    operation,
+  } satisfies ImageResult;
 }
 
-function buildInput(prompt: string, file?: Express.Multer.File): ResponsesApiInput | string {
-  if (!file) {
-    return prompt;
+function providerHeaders(apiKey: string, json = false) {
+  return {
+    Authorization: `Bearer ${apiKey}`,
+    ...(json ? { "Content-Type": "application/json" } : {}),
+  };
+}
+
+function bufferToBlobPart(buffer: Buffer) {
+  const copy = new Uint8Array(buffer.byteLength);
+  copy.set(buffer);
+  return copy;
+}
+
+export async function generateImage(prompt: string, options: ImageOptions): Promise<ImageResult> {
+  const config = getProviderConfig();
+  const requestBody = {
+    model: config.imageModel,
+    prompt,
+    size: options.size,
+    quality: options.quality,
+    output_format: options.outputFormat,
+  };
+
+  console.log("[DEBUG-gateway] imageGenerationRequest", {
+    model: requestBody.model,
+    promptLength: prompt.length,
+    size: requestBody.size,
+    quality: requestBody.quality,
+    outputFormat: requestBody.output_format,
+  });
+
+  const response = await fetch(`${config.baseUrl}/images/generations`, {
+    method: "POST",
+    headers: providerHeaders(config.apiKey, true),
+    body: JSON.stringify(requestBody),
+    signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS),
+  });
+
+  return normalizeImageResponse(response, options, "generate", config.imageModel);
+}
+
+function appendImage(form: FormData, fieldName: string, file: ImageFile) {
+  const filename = file.originalname || "reference-image";
+  form.append(fieldName, new Blob([bufferToBlobPart(file.buffer)], { type: file.mimetype }), filename);
+}
+
+export async function editImages(
+  prompt: string,
+  options: ImageOptions,
+  files: ImageFile[],
+  mask?: ImageFile,
+): Promise<ImageResult> {
+  if (!files.length) {
+    throw createProviderFailure(400, "At least one reference image is required for editing.");
   }
+
+  const config = getProviderConfig();
+  const form = new FormData();
+  form.set("model", config.imageModel);
+  form.set("prompt", prompt);
+  form.set("size", options.size);
+  form.set("quality", options.quality);
+  form.set("output_format", options.outputFormat);
+
+  for (const file of files) {
+    // The OpenAI Images API uses image[] for one or more input images.
+    appendImage(form, "image[]", file);
+  }
+
+  if (mask) {
+    appendImage(form, "mask", mask);
+  }
+
+  console.log("[DEBUG-gateway] imageEditRequest", {
+    model: config.imageModel,
+    promptLength: prompt.length,
+    imageCount: files.length,
+    hasMask: Boolean(mask),
+    size: options.size,
+    quality: options.quality,
+    outputFormat: options.outputFormat,
+  });
+
+  const response = await fetch(`${config.baseUrl}/images/edits`, {
+    method: "POST",
+    headers: providerHeaders(config.apiKey),
+    body: form,
+    signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS),
+  });
+
+  return normalizeImageResponse(response, options, "edit", config.imageModel);
+}
+
+function collectOutputText(value: unknown, output: string[]) {
+  if (Array.isArray(value)) {
+    for (const item of value) {
+      collectOutputText(item, output);
+    }
+
+    return;
+  }
+
+  if (!value || typeof value !== "object") {
+    return;
+  }
+
+  const item = value as Record<string, unknown>;
+
+  if (typeof item.output_text === "string") {
+    output.push(item.output_text);
+  }
+
+  if (typeof item.text === "string" && (!item.type || item.type === "output_text" || item.type === "text")) {
+    output.push(item.text);
+  }
+
+  if (item.content) {
+    collectOutputText(item.content, output);
+  }
+
+  if (item.output) {
+    collectOutputText(item.output, output);
+  }
+}
+
+function findReviewText(payload: ProviderPayload | null) {
+  const output: string[] = [];
+
+  if (payload?.output_text) {
+    output.push(payload.output_text);
+  }
+
+  collectOutputText(payload?.output, output);
+
+  return [...new Set(output.map((text) => text.trim()).filter(Boolean))].join("\n\n");
+}
+
+function buildReviewPrompt(reviewFocus?: string) {
+  const focus = reviewFocus?.trim() || "overall visual quality, prompt alignment, composition, subject consistency, typography, and likely improvement opportunities";
 
   return [
-    {
-      role: "user",
-      content: [
-        {
-          type: "input_text",
-          text: prompt,
-        },
-        {
-          type: "input_image",
-          image_url: `data:${file.mimetype};base64,${file.buffer.toString("base64")}`,
-        },
-      ],
-    },
-  ];
+    "Review the supplied reference image(s) as a senior art director before an image edit.",
+    `Focus on: ${focus}.`,
+    "Return a concise, actionable review with these sections:",
+    "1. Verdict",
+    "2. What is working",
+    "3. Problems or risks",
+    "4. Specific edit instructions",
+    "5. A ready-to-use image editing prompt",
+    "Do not claim to have changed the image. Describe only what is visible and what should be changed.",
+  ].join("\n");
 }
 
-async function generate(prompt: string, options: ImageOptions, file?: Express.Multer.File) {
+export async function reviewImages(reviewFocus: string | undefined, files: ImageFile[]): Promise<ImageReviewResult> {
+  if (!files.length) {
+    throw createProviderFailure(400, "At least one reference image is required for review.");
+  }
+
   const config = getProviderConfig();
-  const input = buildInput(prompt, file);
+  const content: ResponsesApiInput[0]["content"] = [
+    {
+      type: "input_text",
+      text: buildReviewPrompt(reviewFocus),
+    },
+    ...files.map((file) => ({
+      type: "input_image" as const,
+      image_url: `data:${file.mimetype};base64,${file.buffer.toString("base64")}`,
+    })),
+  ];
+
   const requestBody = {
     model: config.textModel,
-    input,
-    tools: [
+    input: [
       {
-        type: "image_generation",
-        model: config.imageModel,
-        size: options.size,
-        quality: options.quality,
-        output_format: options.outputFormat,
+        role: "user" as const,
+        content,
       },
-    ],
+    ] satisfies ResponsesApiInput,
     stream: false,
   };
 
-  console.log("[DEBUG-gateway] providerConfig", {
-    baseUrl: config.baseUrl,
-    textModel: config.textModel,
-    imageModel: config.imageModel,
-    defaultImageSize: config.imageSize,
-    defaultImageQuality: config.imageQuality,
-    defaultImageOutputFormat: config.imageOutputFormat,
-    hasApiKey: Boolean(config.apiKey),
-  });
-
-  console.log("[DEBUG-gateway] requestBody", {
-    model: requestBody.model,
-    inputType: typeof requestBody.input,
-    inputPreview:
-      typeof requestBody.input === "string"
-        ? requestBody.input
-        : "[non-string input omitted]",
-    hasReferenceImage: Boolean(file),
-    toolType: requestBody.tools[0].type,
-    toolModel: requestBody.tools[0].model,
-    toolSize: requestBody.tools[0].size,
-    toolQuality: requestBody.tools[0].quality,
-    toolOutputFormat: requestBody.tools[0].output_format,
-    stream: requestBody.stream,
+  console.log("[DEBUG-gateway] imageReviewRequest", {
+    model: config.textModel,
+    imageCount: files.length,
+    focusLength: reviewFocus?.trim().length || 0,
   });
 
   const response = await fetch(`${config.baseUrl}/responses`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${config.apiKey}`,
-    },
+    headers: providerHeaders(config.apiKey, true),
     body: JSON.stringify(requestBody),
-    signal: AbortSignal.timeout(300_000),
+    signal: AbortSignal.timeout(PROVIDER_TIMEOUT_MS),
   });
 
-  return normalizeProviderResponse(response, options.outputFormat);
+  const payload = await parseProviderPayload(response);
+  const text = findReviewText(payload);
+
+  if (!text) {
+    throw createProviderFailure(502, "Image review failed.", "Provider response did not include review text.");
+  }
+
+  return {
+    text,
+    model: config.textModel,
+    imageCount: files.length,
+  };
 }
 
+// Backwards-compatible wrappers used by the browser UI.
 export async function generateFromPrompt(prompt: string, options: ImageOptions) {
-  return generate(prompt, options);
+  const result = await generateImage(prompt, options);
+  return result.imageDataUrl;
 }
 
-export async function generateFromPromptAndReferenceImage(prompt: string, options: ImageOptions, file: Express.Multer.File) {
-  return generate(prompt, options, file);
+export async function generateFromPromptAndReferenceImage(prompt: string, options: ImageOptions, file: ImageFile) {
+  const result = await editImages(prompt, options, [file]);
+  return result.imageDataUrl;
 }
 
 export function toOperatorFailure(error: unknown): OperatorFailure {
   if (
     (error instanceof DOMException && error.name === "AbortError") ||
-    (error instanceof Error && error.message.toLowerCase().includes("timeout"))
+    (error instanceof Error && (error.name === "TimeoutError" || error.message.toLowerCase().includes("timeout")))
   ) {
     console.log("[DEBUG-gateway] upstreamTimeout", {
-      reason: error instanceof Error ? error.message : "AbortSignal timeout after 180 seconds",
+      reason: error instanceof Error ? error.message : "AbortSignal timeout after 300 seconds",
     });
 
     return {
       status: 504,
       error: "Provider request timed out.",
-      technicalDetails: "AinaibaHub did not respond within 300 seconds.",
+      technicalDetails: "YAI Router did not respond within 300 seconds.",
     };
   }
 

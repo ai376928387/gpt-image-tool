@@ -1,9 +1,9 @@
 import dotenv from "dotenv";
 
-dotenv.config({ path: "/home/wicky/Documents/dirty-place/medical-tour/image-generator-app/.env" });
+dotenv.config({ path: new URL("./.env", import.meta.url) });
 
-const apiKey = process.env.API_KEY;
-const baseUrl = process.env.BASE_URL || "https://api-xai.ainaibahub.com/v1";
+const apiKey = process.env.XAI_API_KEY || process.env.API_KEY;
+const baseUrl = process.env.BASE_URL || "https://api.yairouter.com/v1";
 
 const bodyBase = {
   model: process.env.TEXT_MODEL || "gpt-5.5",

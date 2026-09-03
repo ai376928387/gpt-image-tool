@@ -1,0 +1,7 @@
+# Project-scoped Codex MCP configuration.
+# Codex starts this stdio adapter on demand; the adapter calls the gateway
+# already running on GATEWAY_PORT (default: 3001).
+
+[mcp_servers.gpt_image_2_local]
+command = "node"
+args = ["gateway/dist/mcp-server.js"]

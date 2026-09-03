@@ -7,10 +7,12 @@
     "dev:client": "npm run dev -w client",
     "dev:gateway": "npm run dev -w gateway",
     "build": "npm run build -w client && npm run build -w gateway",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "test:gateway": "npm run test --workspace gateway"
   },
   "devDependencies": {
     "@playwright/test": "^1.55.0",
-    "concurrently": "^9.2.1"
+    "concurrently": "^9.2.1",
+    "dotenv": "^17.2.3"
   }
 }
